@@ -63,6 +63,13 @@ class Parser
     ];
 
     /**
+     * Stack of middleware registered to process data
+     *
+     * @var MiddlewareStack
+     */
+    protected $middlewareStack;
+
+    /**
      * Parser constructor.
      *
      * @param CharsetManager|null $charset
@@ -74,6 +81,7 @@ class Parser
         }
 
         $this->charset = $charset;
+        $this->middlewareStack = new MiddlewareStack();
     }
 
     /**
@@ -102,6 +110,15 @@ class Parser
      */
     public function setPath($path)
     {
+        if (is_writable($path)) {
+            $file = fopen($path, 'a+');
+            fseek($file, -1, SEEK_END);
+            if (fread($file, 1) != "\n") {
+                fwrite($file, PHP_EOL);
+            }
+            fclose($file);
+        }
+
         // should parse message incrementally from file
         $this->resource = mailparse_msg_parse_file($path);
         $this->stream = fopen($path, 'r');
@@ -134,6 +151,11 @@ class Parser
             while (!feof($stream)) {
                 fwrite($tmp_fp, fread($stream, 2028));
             }
+
+            if (fread($tmp_fp, 1) != "\n") {
+                fwrite($tmp_fp, PHP_EOL);
+            }
+
             fseek($tmp_fp, 0);
             $this->stream = &$tmp_fp;
         } else {
@@ -162,9 +184,14 @@ class Parser
      */
     public function setText($data)
     {
-        if (!$data) {
+        if (empty($data)) {
             throw new Exception('You must not call MimeMailParser::setText with an empty string parameter');
         }
+
+        if (substr($data, -1) != "\n") {
+            $data = $data.PHP_EOL;
+        }
+
         $this->resource = mailparse_msg_create();
         // does not parse incrementally, fast memory hog might explode
         mailparse_msg_parse($this->resource, $data);
@@ -185,7 +212,10 @@ class Parser
         $this->parts = [];
         foreach ($structure as $part_id) {
             $part = mailparse_msg_get_part($this->resource, $part_id);
-            $this->parts[$part_id] = mailparse_msg_get_part_data($part);
+            $part_data = mailparse_msg_get_part_data($part);
+            $mimePart = new MimePart($part_id, $part_data);
+            // let each middleware parse the part before saving
+            $this->parts[$part_id] = $this->middlewareStack->parse($mimePart)->getPart();
         }
     }
 
@@ -194,7 +224,7 @@ class Parser
      *
      * @param string $name Header name (case-insensitive)
      *
-     * @return string
+     * @return string|bool
      * @throws Exception
      */
     public function getRawHeader($name)
@@ -203,7 +233,7 @@ class Parser
         if (isset($this->parts[1])) {
             $headers = $this->getPart('headers', $this->parts[1]);
 
-            return (isset($headers[$name])) ? $headers[$name] : false;
+            return isset($headers[$name]) ? $headers[$name] : false;
         } else {
             throw new Exception(
                 'setPath() or setText() or setStream() must be called before retrieving email headers.'
@@ -216,7 +246,7 @@ class Parser
      *
      * @param string $name Header name (case-insensitive)
      *
-     * @return string
+     * @return string|bool
      */
     public function getHeader($name)
     {
@@ -238,7 +268,7 @@ class Parser
     {
         if (isset($this->parts[1])) {
             $headers = $this->getPart('headers', $this->parts[1]);
-            foreach ($headers as $name => &$value) {
+            foreach ($headers as &$value) {
                 if (is_array($value)) {
                     foreach ($value as &$v) {
                         $v = $this->decodeSingleHeader($v);
@@ -302,7 +332,7 @@ class Parser
         $start = $part['starting-pos'];
         $end = $part['starting-pos-body'];
         fseek($this->stream, $start, SEEK_SET);
-        $header = fread($this->stream, $end-$start);
+        $header = fread($this->stream, $end - $start);
         return $header;
     }
 
@@ -316,7 +346,7 @@ class Parser
     {
         $start = $part['starting-pos'];
         $end = $part['starting-pos-body'];
-        $header = substr($this->data, $start, $end-$start);
+        $header = substr($this->data, $start, $end - $start);
         return $header;
     }
 
@@ -357,12 +387,11 @@ class Parser
      *
      * @param string $type text, html or htmlEmbedded
      *
-     * @return false|string Body or False if not found
+     * @return string Body
      * @throws Exception
      */
     public function getMessageBody($type = 'text')
     {
-        $body = false;
         $mime_types = [
             'text'         => 'text/plain',
             'html'         => 'text/html',
@@ -370,7 +399,7 @@ class Parser
         ];
 
         if (in_array($type, array_keys($mime_types))) {
-            $part_type  = $type === 'htmlEmbedded' ? 'html' : $type;
+            $part_type = $type === 'htmlEmbedded' ? 'html' : $type;
             $inline_parts = $this->getInlineParts($part_type);
             $body = empty($inline_parts) ? '' : $inline_parts[0];
         } else {
@@ -425,9 +454,13 @@ class Parser
      */
     public function getAddresses($name)
     {
-        $value = $this->getHeader($name);
-
-        return mailparse_rfc822_parse_addresses($value);
+        $value = $this->getRawHeader($name);
+        $value = (is_array($value)) ? $value[0] : $value;
+        $addresses = mailparse_rfc822_parse_addresses($value);
+        foreach ($addresses as $i => $item) {
+            $addresses[$i]['display'] = $this->decodeHeader($item['display']);
+        }
+        return $addresses;
     }
 
     /**
@@ -438,7 +471,6 @@ class Parser
     public function getInlineParts($type = 'text')
     {
         $inline_parts = [];
-        $dispositions = ['inline'];
         $mime_types = [
             'text'         => 'text/plain',
             'html'         => 'text/html',
@@ -456,9 +488,6 @@ class Parser
                 $headers = $this->getPart('headers', $part);
                 $encodingType = array_key_exists('content-transfer-encoding', $headers) ?
                     $headers['content-transfer-encoding'] : '';
-                if (is_array($encodingType)) {
-                    $encodingType = $encodingType[0];
-                }
                 $undecoded_body = $this->decodeContentTransfer($this->getPartBody($part), $encodingType);
                 $inline_parts[] = $this->charset->decodeCharset($undecoded_body, $this->getPartCharset($part));
             }
@@ -475,9 +504,7 @@ class Parser
     public function getAttachments($include_inline = true)
     {
         $attachments = [];
-        $dispositions = $include_inline ?
-            ['attachment', 'inline'] :
-            ['attachment'];
+        $dispositions = $include_inline ? ['attachment', 'inline'] : ['attachment'];
         $non_attachment_types = ['text/plain', 'text/html'];
         $nonameIter = 0;
 
@@ -487,21 +514,21 @@ class Parser
 
             if (isset($part['disposition-filename'])) {
                 $filename = $this->decodeHeader($part['disposition-filename']);
-                // Escape all potentially unsafe characters from the filename
-                $filename = preg_replace('((^\.)|\/|(\.$))', '_', $filename);
             } elseif (isset($part['content-name'])) {
                 // if we have no disposition but we have a content-name, it's a valid attachment.
                 // we simulate the presence of an attachment disposition with a disposition filename
                 $filename = $this->decodeHeader($part['content-name']);
-                // Escape all potentially unsafe characters from the filename
-                $filename = preg_replace('((^\.)|\/|(\.$))', '_', $filename);
                 $disposition = 'attachment';
             } elseif (in_array($part['content-type'], $non_attachment_types, true)
                 && $disposition !== 'attachment') {
                 // it is a message body, no attachment
                 continue;
-            } elseif (substr($part['content-type'], 0, 10) !== 'multipart/') {
+            } elseif (substr($part['content-type'], 0, 10) !== 'multipart/'
+                && $part['content-type'] !== 'text/plain; (error)') {
                 // if we cannot get it by getMessageBody(), we assume it is an attachment
+                $disposition = 'attachment';
+            }
+            if (in_array($disposition, ['attachment', 'inline']) === false && !empty($disposition)) {
                 $disposition = 'attachment';
             }
 
@@ -509,17 +536,21 @@ class Parser
                 if ($filename == 'noname') {
                     $nonameIter++;
                     $filename = 'noname'.$nonameIter;
+                } else {
+                    // Escape all potentially unsafe characters from the filename
+                    $filename = preg_replace('((^\.)|\/|[\n|\r|\n\r]|(\.$))', '_', $filename);
                 }
 
                 $headersAttachments = $this->getPart('headers', $part);
                 $contentidAttachments = $this->getPart('content-id', $part);
 
+                $attachmentStream = $this->getAttachmentStream($part);
                 $mimePartStr = $this->getPartComplete($part);
 
                 $attachments[] = new Attachment(
                     $filename,
                     $this->getPart('content-type', $part),
-                    $this->getAttachmentStream($part),
+                    $attachmentStream,
                     $disposition,
                     $contentidAttachments,
                     $headersAttachments,
@@ -547,50 +578,10 @@ class Parser
         $filenameStrategy = self::ATTACHMENT_DUPLICATE_SUFFIX
     ) {
         $attachments = $this->getAttachments($include_inline);
-        if (empty($attachments)) {
-            return false;
-        }
-
-        if (!is_dir($attach_dir)) {
-            mkdir($attach_dir);
-        }
 
         $attachments_paths = [];
         foreach ($attachments as $attachment) {
-            // Determine filename
-            switch ($filenameStrategy) {
-                case self::ATTACHMENT_RANDOM_FILENAME:
-                    $attachment_path = tempnam($attach_dir, '');
-                    break;
-                case self::ATTACHMENT_DUPLICATE_THROW:
-                case self::ATTACHMENT_DUPLICATE_SUFFIX:
-                    $attachment_path = $attach_dir . $attachment->getFilename();
-                    break;
-                default:
-                    throw new Exception('Invalid filename strategy argument provided.');
-            }
-
-            // Handle duplicate filename
-            if (file_exists($attachment_path)) {
-                switch ($filenameStrategy) {
-                    case self::ATTACHMENT_DUPLICATE_THROW:
-                        throw new Exception('Could not create file for attachment: duplicate filename.');
-                    case self::ATTACHMENT_DUPLICATE_SUFFIX:
-                        $attachment_path = tempnam($attach_dir, $attachment->getFilename());
-                        break;
-                }
-            }
-
-            /** @var resource $fp */
-            if ($fp = fopen($attachment_path, 'w')) {
-                while ($bytes = $attachment->read()) {
-                    fwrite($fp, $bytes);
-                }
-                fclose($fp);
-                $attachments_paths[] = realpath($attachment_path);
-            } else {
-                throw new Exception('Could not write attachments. Your directory may be unwritable by PHP.');
-            }
+            $attachments_paths[] = $attachment->save($attach_dir, $filenameStrategy);
         }
 
         return $attachments_paths;
@@ -622,8 +613,8 @@ class Parser
                 $written = 0;
                 while ($written < $len) {
                     $write = $len;
-                    $part = fread($this->stream, $write);
-                    fwrite($temp_fp, $this->decodeContentTransfer($part, $encodingType));
+                    $data = fread($this->stream, $write);
+                    fwrite($temp_fp, $this->decodeContentTransfer($data, $encodingType));
                     $written += $write;
                 }
             } elseif ($this->data) {
@@ -650,13 +641,17 @@ class Parser
      */
     protected function decodeContentTransfer($encodedString, $encodingType)
     {
+        if (is_array($encodingType)) {
+            $encodingType = $encodingType[0];
+        }
+
         $encodingType = strtolower($encodingType);
         if ($encodingType == 'base64') {
             return base64_decode($encodedString);
         } elseif ($encodingType == 'quoted-printable') {
             return quoted_printable_decode($encodedString);
         } else {
-            return $encodedString; //8bit, 7bit, binary
+            return $encodedString;
         }
     }
 
@@ -709,7 +704,7 @@ class Parser
             }
 
             $text = $this->charset->decodeCharset($text, $this->charset->getCharsetAlias($charset));
-            $input = str_replace($encoded . $space, $text, $input);
+            $input = str_replace($encoded.$space, $text, $input);
         }
 
         return $input;
@@ -720,14 +715,14 @@ class Parser
      *
      * @param array $part
      *
-     * @return string|false
+     * @return string
      */
     protected function getPartCharset($part)
     {
         if (isset($part['charset'])) {
             return $this->charset->getCharsetAlias($part['charset']);
         } else {
-            return false;
+            return 'us-ascii';
         }
     }
 
@@ -900,5 +895,29 @@ class Parser
     public function getCharset()
     {
         return $this->charset;
+    }
+
+    /**
+     * Add a middleware to the parser MiddlewareStack
+     * Each middleware is invoked when:
+     *   a MimePart is retrieved by mailparse_msg_get_part_data() during $this->parse()
+     * The middleware will receive MimePart $part and the next MiddlewareStack $next
+     *
+     * Eg:
+     *
+     * $Parser->addMiddleware(function(MimePart $part, MiddlewareStack $next) {
+     *      // do something with the $part
+     *      return $next($part);
+     * });
+     *
+     * @param callable $middleware Plain Function or Middleware Instance to execute
+     * @return void
+     */
+    public function addMiddleware(callable $middleware)
+    {
+        if (!$middleware instanceof Middleware) {
+            $middleware = new Middleware($middleware);
+        }
+        $this->middlewareStack = $this->middlewareStack->add($middleware);
     }
 }

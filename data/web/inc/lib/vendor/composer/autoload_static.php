@@ -15,9 +15,18 @@ class ComposerStaticInit873464e4bd965a3168f133248b1b218b
         array (
             'PhpMimeMailParser\\' => 18,
         ),
+        'M' => 
+        array (
+            'MatthiasMullie\\PathConverter\\' => 29,
+            'MatthiasMullie\\Minify\\' => 22,
+        ),
         'H' => 
         array (
             'Html2Text\\' => 10,
+        ),
+        'D' => 
+        array (
+            'Ddeboer\\Imap\\' => 13,
         ),
     );
 
@@ -30,9 +39,31 @@ class ComposerStaticInit873464e4bd965a3168f133248b1b218b
         array (
             0 => __DIR__ . '/..' . '/php-mime-mail-parser/php-mime-mail-parser/src',
         ),
+        'MatthiasMullie\\PathConverter\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/matthiasmullie/path-converter/src',
+        ),
+        'MatthiasMullie\\Minify\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/matthiasmullie/minify/src',
+        ),
         'Html2Text\\' => 
         array (
             0 => __DIR__ . '/..' . '/soundasleep/html2text/src',
+        ),
+        'Ddeboer\\Imap\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/ddeboer/imap/src',
+        ),
+    );
+
+    public static $prefixesPsr0 = array (
+        'O' => 
+        array (
+            'OAuth2' => 
+            array (
+                0 => __DIR__ . '/..' . '/bshaffer/oauth2-server-php/src',
+            ),
         ),
     );
 
@@ -57,6 +88,7 @@ class ComposerStaticInit873464e4bd965a3168f133248b1b218b
         return \Closure::bind(function () use ($loader) {
             $loader->prefixLengthsPsr4 = ComposerStaticInit873464e4bd965a3168f133248b1b218b::$prefixLengthsPsr4;
             $loader->prefixDirsPsr4 = ComposerStaticInit873464e4bd965a3168f133248b1b218b::$prefixDirsPsr4;
+            $loader->prefixesPsr0 = ComposerStaticInit873464e4bd965a3168f133248b1b218b::$prefixesPsr0;
             $loader->classMap = ComposerStaticInit873464e4bd965a3168f133248b1b218b::$classMap;
 
         }, null, ClassLoader::class);

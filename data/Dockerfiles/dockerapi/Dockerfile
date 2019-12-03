@@ -1,8 +1,12 @@
-FROM python:2-alpine
+FROM alpine:3.10
 LABEL maintainer "Andre Peters <andre.peters@servercow.de>"
 
-RUN apk add -U --no-cache iptables ip6tables
-RUN pip install docker==3.0.1 flask flask-restful
+WORKDIR /app
 
-COPY server.py /
-CMD ["python2", "-u", "/server.py"]
+RUN apk add --update --no-cache python3 openssl tzdata \
+ && pip3 install --upgrade pip \
+ && pip3 install --upgrade docker flask flask-restful
+
+COPY dockerapi.py /app/
+
+CMD ["python3", "-u", "/app/dockerapi.py"]
